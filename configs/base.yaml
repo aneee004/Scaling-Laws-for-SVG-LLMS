@@ -1,0 +1,45 @@
+data:
+  dataset_name: "starvector/svg-stack"
+  dataset_split: "train"
+  hf_cache_dir: ""
+  min_chars: 64
+  max_chars: 8000 # tune after inspecting length distribution
+  train_frac: 0.98
+  val_frac: 0.01
+  test_frac: 0.01
+  seed: 42
+  output_dir: "data/processed"
+  token_budget: 100_000_000
+  num_proc: 4
+  hf_map_batch_size: 1000
+  dev_mode: false
+  dev_samples: 1000
+
+tokenizer:
+  vocab_size: 4096
+  save_path: "tokenizers/bpe_4096"
+  special_tokens: ["<|endoftext|>"]
+
+model:
+  n_layer:
+  n_head:
+  n_embd:
+  dropout:
+  max_seq_len: 1024
+
+training:
+  batch_tokens: 524288
+  lr: 3e-4
+  min_lr: 3e-5
+  warmup_frac: 0.05
+  max_steps:
+  grad_clip: 1.0
+  weight_decay: 0.1
+  eval_interval: 500
+  save_interval: 1000
+  checkpoint_dir: "checkpoints"
+  log_backend: "csv"
+
+device:
+  device: "mps"
+  dtype: "float32"

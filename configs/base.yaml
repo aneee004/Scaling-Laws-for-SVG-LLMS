@@ -25,7 +25,8 @@ model:
   n_layer:
   n_head:
   n_embd:
-  dropout:
+  dropout: 0.0
+  bias: false
   max_seq_len: 1024
 
 training:

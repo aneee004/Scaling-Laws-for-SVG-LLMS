@@ -12,6 +12,7 @@ data:
   token_budget: 100_000_000
   num_proc: 4
   hf_map_batch_size: 1000
+  load_from_cache_file: true
   dev_mode: false
   dev_samples: 1000
 

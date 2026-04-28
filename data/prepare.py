@@ -9,9 +9,23 @@ import yaml
 SVG_COL = "Svg"
 
 
-def load_config(config_path, dev_override):
+def _deep_merge(base, override):
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def load_config(config_path, override_path, dev_override):
     with open(config_path) as fp:
         cfg = yaml.safe_load(fp)
+
+    if override_path:
+        with open(override_path) as fp:
+            cfg = _deep_merge(cfg, yaml.safe_load(fp))
 
     if dev_override:
         cfg["data"]["dev_mode"] = True
@@ -60,6 +74,7 @@ def load_and_filter(cfg):
     ds = ds.filter(
         lambda example: min_chars <= len(example[SVG_COL]) <= max_chars,
         num_proc=num_proc,
+        load_from_cache_file=data_cfg["load_from_cache_file"],
     )
 
     if dev_mode:
@@ -210,10 +225,11 @@ def main():
         prog="SVG LLM Model", description="", epilog="Text at the bottom of help"
     )
     parser.add_argument("-c", "--config")
+    parser.add_argument("-o", "--override", default=None)
     parser.add_argument("--dev", action="store_true")
     args = parser.parse_args()
 
-    cfg = load_config(args.config, args.dev)
+    cfg = load_config(args.config, args.override, args.dev)
     ds = load_and_filter(cfg)
     splits = split_dataset(ds, cfg)
     tok = train_tokenizer(splits["train"], cfg)

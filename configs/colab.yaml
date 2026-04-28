@@ -1,0 +1,11 @@
+data:
+  output_dir: "/content/drive/MyDrive/svg-project/data/processed"
+  hf_cache_dir: "/content/drive/MyDrive/svg-project/hf_cache"
+  load_from_cache_file: false
+
+tokenizer:
+  save_path: "/content/drive/MyDrive/svg-project/tokenizers/bpe_4096"
+
+device:
+  device: "cuda"
+  dtype: "bfloat16"

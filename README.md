@@ -49,7 +49,7 @@ project/
   sweep_lr.py                  # short LR sweep per size
   mup_train.py                 # µP variant — set_base_shapes + MuAdamW
   generate.py                  # sampling (temperature/top-k, prefix conditioning)
-  evaluate.py                  # perplexity, XML validity, render rate (planned)
+  evaluate.py                  # perplexity, XML validity, render rate
   report/report.tex            # final writeup
   requirements.txt
 ```
@@ -81,7 +81,11 @@ python mup_train.py -c configs/88m.yaml
 
 # Stage 4 — sample + evaluate the best model
 python generate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --prompt "<svg"
-python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt   # planned
+python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt \
+    --num_samples 100 --output_json results/1m_eval.json
+
+# Perplexity only (skip slow generation)
+python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --skip_generation
 ```
 
 ## Key Design Decisions
@@ -105,7 +109,8 @@ python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt   # pl
   `sweep_lr.py`, five per-size configs). Runs and power-law fit pending.
 - Stage 3 (µP scaling) — code complete (`mup_train.py`, `mup` flag in
   `GPTConfig`, `set_base_shapes()` ordering enforced). Runs pending.
-- Stage 4 — `generate.py` complete; `evaluate.py` pending.
+- Stage 4 — `generate.py` and `evaluate.py` complete. Sample-based runs
+  pending (require a trained checkpoint).
 - Stage 5 (analysis) — pending empirical results.
 
 ## References

@@ -4,3 +4,5 @@ torch
 pyyaml
 tqdm
 mup
+lxml
+cairosvg

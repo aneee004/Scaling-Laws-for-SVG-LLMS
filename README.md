@@ -35,21 +35,22 @@ the best LR ~10× past the largest fitted size.
 ```
 project/
   data/
-    prepare.py           # download → filter → split → tokenize → save
-    processed/           # train.npy, val.npy, test.npy (uint16)
+    prepare.py                 # download → filter → split → tokenize → save
+    processed/                 # train.npy, val.npy, test.npy (uint16, gitignored)
   tokenizers/
-    bpe_4096/            # vocab.json, merges.txt
+    bpe_4096/                  # vocab.json, merges.txt
   configs/
-    base.yaml            # shared defaults
-    {1m,3m,12m,34m,88m}.yaml   # per-size overrides (planned)
+    base.yaml                  # shared defaults
+    colab.yaml                 # Drive-path + cuda overrides for Colab
+    {1m,3m,12m,34m,88m}.yaml   # per-size overrides (n_layer/n_head/n_embd)
   model/
-    transformer.py       # nanoGPT-style decoder (planned)
-  train.py               # token-budget driven training loop (planned)
-  sweep_lr.py            # short LR sweep per size (planned)
-  mup_train.py           # µP variant (planned)
-  generate.py            # sampling, prefix conditioning (planned)
-  evaluate.py            # perplexity, XML validity, render rate (planned)
-  report/report.tex      # final writeup
+    transformer.py             # nanoGPT-style decoder, mup flag for µP runs
+  train.py                     # SP training loop
+  sweep_lr.py                  # short LR sweep per size
+  mup_train.py                 # µP variant — set_base_shapes + MuAdamW
+  generate.py                  # sampling (temperature/top-k, prefix conditioning)
+  evaluate.py                  # perplexity, XML validity, render rate (planned)
+  report/report.tex            # final writeup
   requirements.txt
 ```
 
@@ -67,19 +68,20 @@ runs that produce the actual scaling-law data points.
 
 ```bash
 # Stage 1 — data pipeline (dev mode = 1000 samples for smoke testing)
-python data/prepare.py --config configs/base.yaml --dev
-python data/prepare.py --config configs/base.yaml         # full 100M-token run
+python data/prepare.py -c configs/base.yaml --dev
+python data/prepare.py -c configs/base.yaml -o configs/colab.yaml   # full run on Colab
 
-# Stage 2 — single-size train + LR sweep (planned)
-python train.py     --config configs/1m.yaml
-python sweep_lr.py  --config configs/1m.yaml
+# Stage 2 — SP training and LR sweep
+python sweep_lr.py -c configs/1m.yaml --lrs 1e-4 3e-4 1e-3 3e-3 1e-2
+python train.py    -c configs/1m.yaml                               # full run with chosen LR
 
-# Stage 3 — µP variant (planned)
-python mup_train.py --config configs/1m_mup.yaml
+# Stage 3 — µP variant (LR tuned only on 1m, then transferred)
+python mup_train.py -c configs/1m.yaml
+python mup_train.py -c configs/88m.yaml
 
-# Stage 4 — sample + evaluate the best model (planned)
-python generate.py  --checkpoint checkpoints/best/best.pt --prompt "<svg"
-python evaluate.py  --checkpoint checkpoints/best/best.pt
+# Stage 4 — sample + evaluate the best model
+python generate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --prompt "<svg"
+python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt   # planned
 ```
 
 ## Key Design Decisions
@@ -97,9 +99,14 @@ python evaluate.py  --checkpoint checkpoints/best/best.pt
 ## Status
 
 - Stage 1 (data pipeline) — implemented; dev-mode verified (1000 samples →
-  ~645K train tokens, decoded sample is valid SVG). Full 100M-token run
-  pending.
-- Stages 2–5 — in progress.
+  ~645K train tokens, decoded sample is valid SVG). Full 100M-token run on
+  Colab pending.
+- Stage 2 (SP scaling) — code complete (`model/transformer.py`, `train.py`,
+  `sweep_lr.py`, five per-size configs). Runs and power-law fit pending.
+- Stage 3 (µP scaling) — code complete (`mup_train.py`, `mup` flag in
+  `GPTConfig`, `set_base_shapes()` ordering enforced). Runs pending.
+- Stage 4 — `generate.py` complete; `evaluate.py` pending.
+- Stage 5 (analysis) — pending empirical results.
 
 ## References
 

@@ -3,3 +3,4 @@ tokenizers
 torch
 pyyaml
 tqdm
+mup

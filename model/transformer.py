@@ -15,6 +15,7 @@ class GPTConfig:
     n_embd: int = 384
     dropout: float = 0.0
     bias: bool = False
+    mup: bool = False
 
 
 class CausalSelfAttention(nn.Module):
@@ -28,6 +29,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.mup = config.mup
         self.flash = hasattr(F, "scaled_dot_product_attention")
         if not self.flash:
             self.register_buffer(
@@ -43,6 +45,10 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        if self.mup:
+            # µP: 1/d scaling. Pre-divide q by sqrt(d) so flash's internal
+            # 1/sqrt(d) makes the total scale 1/d.
+            q = q * (1.0 / math.sqrt(k.size(-1)))
         if self.flash:
             y = F.scaled_dot_product_attention(
                 q, k, v,
@@ -50,7 +56,8 @@ class CausalSelfAttention(nn.Module):
                 is_causal=True,
             )
         else:
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            scale = 1.0 / k.size(-1) if self.mup else 1.0 / math.sqrt(k.size(-1))
+            att = (q @ k.transpose(-2, -1)) * scale
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)

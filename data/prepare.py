@@ -1,6 +1,9 @@
 import argparse
+import os
 
 import datasets
+import numpy as np
+import tokenizers
 import yaml
 
 SVG_COL = "Svg"
@@ -98,15 +101,108 @@ def split_dataset(ds, cfg):
 
 
 def train_tokenizer(train_split, cfg):
-    pass
+    tok_cfg = cfg["tokenizer"]
+    vocab_size = tok_cfg["vocab_size"]
+    save_path = tok_cfg["save_path"]
+    special_tokens = tok_cfg["special_tokens"]
+
+    def text_iterator():
+        for example in train_split:
+            yield example[SVG_COL]
+
+    tokenizer = tokenizers.ByteLevelBPETokenizer()
+    tokenizer.train_from_iterator(
+        text_iterator(),
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
+    )
+
+    os.makedirs(save_path, exist_ok=True)
+    tokenizer.save_model(save_path)
+
+    print(f"Trained tokenizer (vocab_size={vocab_size}) saved to {save_path}")
+    return tokenizer
 
 
 def tokenize_and_save(splits, tokenizer, cfg):
-    pass
+    output_dir = cfg["data"]["output_dir"]
+    token_budget = cfg["data"]["token_budget"]
+    batch_size = cfg["data"]["hf_map_batch_size"]
+    max_seq_len = cfg["model"]["max_seq_len"]
+
+    tokenizer.enable_truncation(max_length=max_seq_len)
+    eot_id = tokenizer.token_to_id("<|endoftext|>")
+    if eot_id is None:
+        raise ValueError(
+            "Tokenizer has no <|endoftext|> token. "
+            "Add it to cfg['tokenizer']['special_tokens']."
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    for split_name, split in splits.items():
+        token_ids = []
+        budget_hit = False
+
+        for start in range(0, len(split), batch_size):
+            end = min(start + batch_size, len(split))
+            texts = [split[i][SVG_COL] for i in range(start, end)]
+            encodings = tokenizer.encode_batch(texts)
+
+            for enc in encodings:
+                token_ids.extend(enc.ids)
+                token_ids.append(eot_id)
+
+            if split_name == "train" and len(token_ids) >= token_budget:
+                token_ids = token_ids[:token_budget]
+                budget_hit = True
+                break
+
+        arr = np.array(token_ids, dtype=np.uint16)
+        out_path = os.path.join(output_dir, f"{split_name}.npy")
+        np.save(out_path, arr)
+
+        suffix = " (budget reached)" if budget_hit else ""
+        print(f"{split_name}: {len(arr):,} tokens → {out_path}{suffix}")
 
 
 def verify(cfg):
-    pass
+    output_dir = cfg["data"]["output_dir"]
+    token_budget = cfg["data"]["token_budget"]
+    save_path = cfg["tokenizer"]["save_path"]
+
+    split_names = ["train", "val", "test"]
+
+    # 1. Files exist
+    paths = {name: os.path.join(output_dir, f"{name}.npy") for name in split_names}
+    missing = [name for name, p in paths.items() if not os.path.isfile(p)]
+    if missing:
+        raise FileNotFoundError(f"Missing split files in {output_dir}: {missing}")
+
+    # 2. Load and check shapes
+    arrays = {}
+    for name, p in paths.items():
+        arr = np.load(p)
+        arrays[name] = arr
+        print(f"{name}: {len(arr):,} tokens")
+
+        if len(arr) == 0:
+            raise ValueError(f"{name} split is empty: {p}")
+
+    if len(arrays["train"]) > token_budget:
+        raise ValueError(
+            f"train has {len(arrays['train']):,} tokens, "
+            f"exceeds budget {token_budget:,}"
+        )
+
+    # 3. Spot-check a decode
+    vocab_file = os.path.join(save_path, "vocab.json")
+    merges_file = os.path.join(save_path, "merges.txt")
+    tokenizer = tokenizers.ByteLevelBPETokenizer.from_file(vocab_file, merges_file)
+
+    sample_ids = arrays["train"][:50].tolist()
+    decoded = tokenizer.decode(sample_ids)
+    print(f"\nFirst 50 train tokens decoded:\n{decoded!r}")
 
 
 def main():

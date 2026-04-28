@@ -1,0 +1,7 @@
+model:
+  n_layer: 18
+  n_head: 12
+  n_embd: 768
+
+training:
+  max_steps: 20000

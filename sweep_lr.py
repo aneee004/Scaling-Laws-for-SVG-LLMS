@@ -114,7 +114,7 @@ def configure_optimizer(model, train_cfg, device_cfg, use_mup=False):
     )
 
 
-MUP_BASE_WIDTH = 128
+MUP_BASE_WIDTH = 96   # see mup_train.py — divisible by every n_head we use
 
 
 def build_model(gpt_cfg, device, use_mup):

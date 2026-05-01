@@ -20,9 +20,11 @@ BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 
 # Width of the proxy base model used by set_base_shapes().
-# Must be the same across all model sizes in a µP sweep so that
-# LR scaling is consistent.
-MUP_BASE_WIDTH = 128
+# Must be the same across all model sizes in a µP sweep so that LR
+# scaling is consistent. Must also be divisible by every n_head used
+# in our configs ({4, 6, 8, 12}); LCM = 24, so 96 is the smallest
+# sensible value that is < every target n_embd in our sweep.
+MUP_BASE_WIDTH = 96
 
 
 @dataclass

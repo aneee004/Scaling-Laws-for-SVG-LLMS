@@ -106,8 +106,15 @@ class GPT(nn.Module):
             h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight  # weight tying
+        if config.mup:
+            # µP requires the output layer to be MuReadout so the per-readout
+            # learning-rate / output multiplier is applied. MuSharedReadout
+            # additionally ties the weight to wte.weight (so wte is canonical).
+            from mup import MuSharedReadout
+            self.lm_head = MuSharedReadout(self.transformer.wte.weight, bias=False)
+        else:
+            self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+            self.transformer.wte.weight = self.lm_head.weight  # weight tying
 
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():

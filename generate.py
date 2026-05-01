@@ -1,5 +1,6 @@
 import argparse
 import os
+import pathlib
 from dataclasses import replace
 
 import torch
@@ -8,6 +9,8 @@ import yaml
 from tokenizers import ByteLevelBPETokenizer
 
 from model.transformer import GPT, GPTConfig
+
+BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 
 def _deep_merge(base, override):
@@ -21,8 +24,10 @@ def _deep_merge(base, override):
 
 
 def load_config(config_path, override_path):
-    with open(config_path) as fp:
+    with open(BASE_CONFIG) as fp:
         cfg = yaml.safe_load(fp)
+    with open(config_path) as fp:
+        cfg = _deep_merge(cfg, yaml.safe_load(fp))
     if override_path:
         with open(override_path) as fp:
             cfg = _deep_merge(cfg, yaml.safe_load(fp))
@@ -57,8 +62,28 @@ def load_model(checkpoint_path, gpt_cfg, device):
     return model
 
 
+def _apply_top_k(logits, top_k):
+    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    logits[logits < v[:, [-1]]] = float("-inf")
+    return logits
+
+
+def _apply_top_p(logits, top_p):
+    """Nucleus filter: keep the smallest set of tokens whose cumulative probability >= top_p."""
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+    cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+    # Mask tokens beyond the nucleus, but always keep at least the top-1 token.
+    mask = cum_probs > top_p
+    mask[..., 1:] = mask[..., :-1].clone()
+    mask[..., 0]  = False
+    sorted_logits[mask] = float("-inf")
+    # Scatter back into original index order
+    return torch.zeros_like(logits).scatter_(-1, sorted_idx, sorted_logits)
+
+
 @torch.no_grad()
-def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, eot_id=None):
+def generate(model, idx, max_new_tokens, temperature=1.0,
+             top_k=None, top_p=None, eot_id=None):
     """Sample tokens autoregressively. idx: [B, T] of token ids on the model's device."""
     max_seq_len = model.config.max_seq_len
     for _ in range(max_new_tokens):
@@ -66,8 +91,9 @@ def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, eot_id=Non
         logits   = model(idx_cond)[:, -1, :] / temperature
 
         if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = float("-inf")
+            logits = _apply_top_k(logits, top_k)
+        if top_p is not None and top_p < 1.0:
+            logits = _apply_top_p(logits, top_p)
 
         probs      = F.softmax(logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
@@ -89,6 +115,8 @@ def main():
     parser.add_argument("--max_new_tokens",   type=int,   default=512)
     parser.add_argument("--temperature",      type=float, default=0.8)
     parser.add_argument("--top_k",            type=int,   default=200)
+    parser.add_argument("--top_p",            type=float, default=None,
+                        help="Nucleus sampling threshold. Set <1.0 to enable; combines with top_k.")
     parser.add_argument("--output_dir",       default=None,
                         help="Save samples here (one file per sample). If omitted, prints to stdout.")
     parser.add_argument("--seed",             type=int,   default=None)
@@ -122,7 +150,8 @@ def main():
         x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         out = generate(
             model, x, args.max_new_tokens,
-            temperature=args.temperature, top_k=args.top_k, eot_id=eot_id,
+            temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
+            eot_id=eot_id,
         )
         out_ids = out[0].tolist()
 

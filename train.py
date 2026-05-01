@@ -3,15 +3,19 @@ import csv
 import inspect
 import math
 import os
+import pathlib
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
 import torch
 import yaml
 
 from model.transformer import GPT, GPTConfig
+
+BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 
 @dataclass
@@ -21,13 +25,13 @@ class TrainingConfig:
     lr: float
     min_lr: float
     warmup_frac: float
-    max_steps: int
     grad_clip: float
     weight_decay: float
     eval_interval: int
     save_interval: int
     checkpoint_dir: str
     log_backend: str
+    max_steps: Optional[int] = None    # if None: auto = ceil(len(train_data) / batch_tokens) — i.e. 1 epoch
 
 
 @dataclass
@@ -47,8 +51,10 @@ def _deep_merge(base, override):
 
 
 def load_config(config_path, override_path):
-    with open(config_path) as fp:
+    with open(BASE_CONFIG) as fp:
         cfg = yaml.safe_load(fp)
+    with open(config_path) as fp:
+        cfg = _deep_merge(cfg, yaml.safe_load(fp))
     if override_path:
         with open(override_path) as fp:
             cfg = _deep_merge(cfg, yaml.safe_load(fp))
@@ -117,6 +123,16 @@ def evaluate(model, val_data, seq_len, batch_size, device, ctx, eval_batches=20)
     return sum(losses) / len(losses)
 
 
+def resolve_max_steps(train_cfg, train_data) -> TrainingConfig:
+    """If max_steps is unset, set it to one epoch over train_data."""
+    if train_cfg.max_steps is None:
+        steps = max(1, math.ceil(len(train_data) / train_cfg.batch_tokens))
+        print(f"max_steps unset — auto = 1 epoch = {steps} steps "
+              f"({len(train_data):,} tokens / {train_cfg.batch_tokens:,} per step)")
+        return replace(train_cfg, max_steps=steps)
+    return train_cfg
+
+
 def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir):
     device = torch.device(device_cfg.device)
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[device_cfg.dtype]
@@ -125,6 +141,8 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
         if device_cfg.device == "cuda"
         else nullcontext()
     )
+
+    train_cfg = resolve_max_steps(train_cfg, train_data)
 
     seq_len = gpt_cfg.max_seq_len
     micro_batch_size = train_cfg.micro_batch_size
@@ -140,17 +158,20 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
     log_path = os.path.join(checkpoint_dir, "log.csv")
     log_file = open(log_path, "w", newline="")
     logger = csv.writer(log_file)
-    logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s"])
+    logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s", "tokens_per_sec", "peak_mem_gb"])
     log_file.flush()
 
     best_val_loss = float("inf")
     t0 = time.time()
+    if device_cfg.device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     for step in range(train_cfg.max_steps):
         lr = get_lr(step, train_cfg)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
+        step_start = time.time()
         optimizer.zero_grad()
         accum_loss = 0.0
         for _ in range(grad_accum_steps):
@@ -162,15 +183,21 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
         optimizer.step()
+        step_dt = time.time() - step_start
+        tokens_per_sec = train_cfg.batch_tokens / max(step_dt, 1e-6)
 
         if step % train_cfg.eval_interval == 0:
             val_loss = evaluate(model, val_data, seq_len, micro_batch_size, device, ctx)
-            elapsed = time.time() - t0
+            elapsed  = time.time() - t0
+            peak_mem = (torch.cuda.max_memory_allocated() / 1e9
+                        if device_cfg.device == "cuda" else 0.0)
             print(
-                f"step {step:5d} | train {accum_loss:.4f} | val {val_loss:.4f} | lr {lr:.2e} | {elapsed:.1f}s"
+                f"step {step:5d} | train {accum_loss:.4f} | val {val_loss:.4f} | "
+                f"lr {lr:.2e} | {tokens_per_sec:,.0f} tok/s | mem {peak_mem:.2f} GB | {elapsed:.1f}s"
             )
             logger.writerow(
-                [step, round(accum_loss, 6), round(val_loss, 6), lr, round(elapsed, 1)]
+                [step, round(accum_loss, 6), round(val_loss, 6), lr,
+                 round(elapsed, 1), round(tokens_per_sec, 1), round(peak_mem, 3)]
             )
             log_file.flush()
 

@@ -6,3 +6,6 @@ tqdm
 mup
 lxml
 cairosvg
+pandas
+scipy
+matplotlib

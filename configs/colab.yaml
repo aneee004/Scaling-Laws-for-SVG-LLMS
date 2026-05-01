@@ -6,6 +6,9 @@ data:
 tokenizer:
   save_path: "/content/drive/MyDrive/svg-project/tokenizers/bpe_4096"
 
+training:
+  checkpoint_dir: "/content/drive/MyDrive/svg-project/checkpoints"
+
 device:
   device: "cuda"
   dtype: "bfloat16"

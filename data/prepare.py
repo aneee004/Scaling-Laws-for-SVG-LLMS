@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -9,6 +10,11 @@ import tokenizers
 import yaml
 
 SVG_COL = "Svg"
+
+# Regexes for SVG normalisation.
+XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+WHITESPACE_RE  = re.compile(r"\s+")
+NUMBER_RE      = re.compile(r"-?\d+\.\d+")
 
 
 @dataclass
@@ -28,6 +34,10 @@ class DataConfig:
     dev_mode: bool
     dev_samples: int
     hf_cache_dir: str = ""
+    # Cleaning / validation flags (defaulted for back-compat with older configs)
+    clean_svgs: bool = True
+    coord_precision: int = 1
+    validate_xml: bool = True
 
     @property
     def cache_dir(self) -> Optional[str]:
@@ -91,6 +101,66 @@ def load_config(config_path, override_path, dev_override):
     return data_cfg, tok_cfg, model_cfg
 
 
+def clean_svg_text(text: str, coord_precision: int = 1) -> str:
+    """Strip XML comments, collapse whitespace, round numeric coordinates.
+
+    SVG coordinate precision rounding shrinks the BPE vocabulary by collapsing
+    near-duplicate numeric strings (e.g. ``12.34567`` and ``12.34568``) into a
+    single token.
+    """
+    text = XML_COMMENT_RE.sub("", text)
+    text = WHITESPACE_RE.sub(" ", text).strip()
+
+    def _round(match):
+        return f"{float(match.group(0)):.{coord_precision}f}"
+
+    text = NUMBER_RE.sub(_round, text)
+    return text
+
+
+def is_valid_xml(text: str) -> bool:
+    """True iff `text` parses as well-formed XML via lxml."""
+    try:
+        from lxml import etree
+        etree.fromstring(text.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def clean_and_validate(ds, data_cfg: DataConfig):
+    """Apply optional SVG cleaning and XML validation as map/filter steps."""
+    if not (data_cfg.clean_svgs or data_cfg.validate_xml):
+        return ds
+
+    n_before = len(ds)
+
+    if data_cfg.clean_svgs:
+        precision = data_cfg.coord_precision
+
+        def _clean(example):
+            example[SVG_COL] = clean_svg_text(example[SVG_COL], precision)
+            return example
+
+        ds = ds.map(
+            _clean,
+            num_proc=data_cfg.num_proc,
+            load_from_cache_file=data_cfg.load_from_cache_file,
+            desc="Cleaning SVGs",
+        )
+
+    if data_cfg.validate_xml:
+        ds = ds.filter(
+            lambda ex: is_valid_xml(ex[SVG_COL]),
+            num_proc=data_cfg.num_proc,
+            load_from_cache_file=data_cfg.load_from_cache_file,
+            desc="Validating XML",
+        )
+
+    print(f"Clean+validate: {n_before} → {len(ds)} samples")
+    return ds
+
+
 def load_and_filter(data_cfg: DataConfig):
     ds = datasets.load_dataset(
         data_cfg.dataset_name,
@@ -109,7 +179,7 @@ def load_and_filter(data_cfg: DataConfig):
     if data_cfg.dev_mode:
         ds = ds.select(range(min(data_cfg.dev_samples, len(ds))))
 
-    print(f"Filtered {n_before} → {len(ds)} samples")
+    print(f"Length filter: {n_before} → {len(ds)} samples")
     return ds
 
 
@@ -157,7 +227,12 @@ def train_tokenizer(train_split, tok_cfg: TokenizerConfig):
 
 
 def tokenize_and_save(splits, tokenizer, data_cfg: DataConfig, model_cfg: ModelConfig):
-    tokenizer.enable_truncation(max_length=model_cfg.max_seq_len)
+    """Tokenise each split and save as flat uint16 arrays.
+
+    Sequences whose token length exceeds ``max_seq_len`` are dropped entirely
+    (per the PDF spec: filter long SVGs out). Truncation would silently bias
+    the corpus toward partial SVGs.
+    """
     eot_id = tokenizer.token_to_id("<|endoftext|>")
     if eot_id is None:
         raise ValueError(
@@ -165,11 +240,14 @@ def tokenize_and_save(splits, tokenizer, data_cfg: DataConfig, model_cfg: ModelC
             "Add it to tokenizer.special_tokens in your config."
         )
 
+    max_len = model_cfg.max_seq_len
     os.makedirs(data_cfg.output_dir, exist_ok=True)
 
     for split_name, split in splits.items():
         token_ids = []
         budget_hit = False
+        kept = 0
+        dropped_long = 0
 
         for start in range(0, len(split), data_cfg.hf_map_batch_size):
             end = min(start + data_cfg.hf_map_batch_size, len(split))
@@ -177,8 +255,12 @@ def tokenize_and_save(splits, tokenizer, data_cfg: DataConfig, model_cfg: ModelC
             encodings = tokenizer.encode_batch(texts)
 
             for enc in encodings:
+                if len(enc.ids) > max_len:
+                    dropped_long += 1
+                    continue
                 token_ids.extend(enc.ids)
                 token_ids.append(eot_id)
+                kept += 1
 
             if split_name == "train" and len(token_ids) >= data_cfg.token_budget:
                 token_ids = token_ids[:data_cfg.token_budget]
@@ -190,7 +272,10 @@ def tokenize_and_save(splits, tokenizer, data_cfg: DataConfig, model_cfg: ModelC
         np.save(out_path, arr)
 
         suffix = " (budget reached)" if budget_hit else ""
-        print(f"{split_name}: {len(arr):,} tokens → {out_path}{suffix}")
+        print(
+            f"{split_name}: {len(arr):,} tokens, "
+            f"kept {kept:,}, dropped_long {dropped_long:,} → {out_path}{suffix}"
+        )
 
 
 def verify(data_cfg: DataConfig, tok_cfg: TokenizerConfig):
@@ -233,6 +318,7 @@ def main():
 
     data_cfg, tok_cfg, model_cfg = load_config(args.config, args.override, args.dev)
     ds = load_and_filter(data_cfg)
+    ds = clean_and_validate(ds, data_cfg)
     splits = split_dataset(ds, data_cfg)
     tok = train_tokenizer(splits["train"], tok_cfg)
     tokenize_and_save(splits, tok, data_cfg, model_cfg)

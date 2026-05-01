@@ -10,16 +10,24 @@ the best LR ~10× past the largest fitted size.
 
 ## Project Parts
 
-1. **Data Collection & Preprocessing** — `starvector/svg-stack`, byte-level BPE
-   (vocab 4096), 100M-token train budget, 98/1/1 split.
-2. **Transformer Scaling Study** — five SP configs (`1m` … `88m`), LR sweep per
-   size, fit power law on val loss.
-3. **µP Scaling & Extrapolation** — same configs under Microsoft `mup`,
-   compare SP vs µP curves, extrapolate the optimal LR.
-4. **Best Model Training & Sample Generation** — train compute-optimal config to
-   completion; unconditional and prefix-conditioned samples; XML/render
-   validity metrics.
-5. **Design Decisions & Analysis** — written discussion in `report/report.tex`.
+1. **Data Collection & Preprocessing** — `starvector/svg-stack` (chosen over the
+   PDF-recommended `svg-icons-simple` to hit the 100M-token target without
+   supplementing from multiple sources; see report §2 for justification).
+   Pipeline: filter by length → strip XML comments and collapse whitespace →
+   round numerics to 1 decimal → validate XML → tokenise (byte-level BPE,
+   vocab 4096) → 98/1/1 split.
+2. **Transformer Scaling Study (SP)** — five sizes (`1m` … `88m`), LR sweep on
+   the smallest, single LR re-used across sizes, 1-epoch training,
+   power-law fit on val loss.
+3. **µP Scaling & Extrapolation** — same five sizes under Microsoft `mup`,
+   independent µP LR sweep on the smallest, transferred to all larger sizes.
+   Power-law fit + extrapolation to ~10× the largest fitted scale.
+4. **Best Model Training & Sample Generation** — trains the largest model to
+   convergence; unconditional and prefix-conditioned generation with
+   temperature, top-k, and top-p sampling; XML / structural / render validity
+   metrics.
+5. **Design Decisions & Analysis** — written discussion in `report/report.tex`,
+   figures in `analysis.ipynb`.
 
 ## Stack
 
@@ -50,7 +58,13 @@ project/
   mup_train.py                 # µP variant — set_base_shapes + MuAdamW
   generate.py                  # sampling (temperature/top-k, prefix conditioning)
   evaluate.py                  # perplexity, XML validity, render rate
-  report/report.tex            # final writeup
+  analysis.ipynb               # power-law fits, training curves, scaling figures
+  colab/                       # local-only Colab notebooks (gitignored)
+    smoke.ipynb                #   end-to-end smoke test on Colab L4
+    pipeline.ipynb             #   full pipeline (data → train → eval → analysis)
+  report/
+    report.tex                 # final writeup
+    figures/                   # PDFs produced by analysis.ipynb
   requirements.txt
 ```
 
@@ -71,34 +85,65 @@ runs that produce the actual scaling-law data points.
 python data/prepare.py -c configs/base.yaml --dev
 python data/prepare.py -c configs/base.yaml -o configs/colab.yaml   # full run on Colab
 
-# Stage 2 — SP training and LR sweep
-python sweep_lr.py -c configs/1m.yaml --lrs 1e-4 3e-4 1e-3 3e-3 1e-2
-python train.py    -c configs/1m.yaml                               # full run with chosen LR
+# Stage 2 — SP training (1 epoch, max_steps auto-computed if null)
+python sweep_lr.py -c configs/1m.yaml --lrs 1e-4 3e-4 1e-3 3e-3 1e-2   # SP sweep on smallest only
+python train.py    -c configs/1m.yaml -o configs/colab.yaml            # full SP run, repeat per size
 
-# Stage 3 — µP variant (LR tuned only on 1m, then transferred)
-python mup_train.py -c configs/1m.yaml
-python mup_train.py -c configs/88m.yaml
+# Stage 3 — µP variant. Independent LR sweep on 1m, transfer to all sizes.
+python sweep_lr.py -c configs/1m.yaml --lrs 1e-4 3e-4 1e-3 3e-3 1e-2 --mup
+python mup_train.py -c configs/1m.yaml -o configs/colab.yaml
+python mup_train.py -c configs/88m.yaml -o configs/colab.yaml
 
 # Stage 4 — sample + evaluate the best model
-python generate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --prompt "<svg"
-python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt \
-    --num_samples 100 --output_json results/1m_eval.json
+# Generation supports temperature, top-k, AND top-p (nucleus) sampling.
+python generate.py -c configs/88m.yaml --checkpoint checkpoints/88m/best.pt \
+    --prompt "<svg" --temperature 0.8 --top_k 200 --top_p 0.9 --num_samples 10 \
+    --output_dir samples/best/
+
+# Evaluate: perplexity + XML validity + structural validity + render rate.
+# Use --temperature_sweep to gather metrics at multiple temperatures.
+python evaluate.py -c configs/88m.yaml --checkpoint checkpoints/88m/best.pt \
+    --num_samples 100 --temperature_sweep 0.5 0.8 1.0 \
+    --output_json results/88m_eval.json
 
 # Perplexity only (skip slow generation)
-python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --skip_generation
+python evaluate.py -c configs/88m.yaml --checkpoint checkpoints/88m/best.pt --skip_generation
+
+# Stage 5 — analysis (after all training/eval runs are in)
+jupyter notebook analysis.ipynb
 ```
+
+`analysis.ipynb` reads `checkpoints/{size}/log.csv`, `checkpoints/{size}/sweep/sweep_results.csv`, and `results/{size}_eval.json`, then produces:
+
+- training curves (SP vs µP, per size)
+- LR sweep visualisation (val loss vs LR per size)
+- power-law fit `L = a · N^(-α) + c` with 95% CIs (SP and µP)
+- µP extrapolation to ~10× the largest fitted size
+- sample quality vs model size (XML well-formedness, render rate, perplexity)
+- a summary table for inclusion in the report
+
+Figures are written to `report/figures/` for the LaTeX report.
 
 ## Key Design Decisions
 
-- Vocab 4096 BPE — SVG has heavy substring repetition; a moderate vocab captures
-  common tag/attribute fragments without over-fragmenting the long tail.
-- Max sequence length 1024 — balances context against compute on the 1M model.
-- Train/val/test split is by file count (98/1/1), not by token position, to keep
-  whole SVGs intact across splits.
-- µP attention scale `1/d` (not `1/√d`) per Tensor Programs V.
-- Token budget per run rather than fixed steps, so different sizes are
-  comparable on the loss-vs-compute axis.
-- LR schedule: cosine with 5% warmup; AdamW with weight decay 0.1.
+- **Dataset deviation from spec** — `starvector/svg-stack` instead of
+  `svg-icons-simple`. Reason: hits the 100M-token target without
+  supplementation, and provides a stricter validity test. See report §2.
+- **Vocab 4096 BPE** — SVG has heavy substring repetition; a moderate vocab
+  captures common tag/attribute fragments without over-fragmenting the long tail.
+- **Coordinate-precision rounding (1 decimal place)** before tokenisation, so
+  the BPE doesn't waste merges on near-duplicate numerics.
+- **Max sequence length 1024** — balances context against compute. SVGs that
+  exceed this are dropped entirely (not truncated) to avoid biasing the
+  training distribution.
+- **Train/val/test split by file (98/1/1)** — keeps whole SVGs intact across
+  splits, required for the XML-validity metric.
+- **µP attention scale `1/d`** (not `1/√d`) per Tensor Programs V. Implemented
+  by pre-dividing q by `√d` before Flash Attention's internal `1/√d`.
+- **1-epoch training** matched across sizes per the project spec — `max_steps`
+  is auto-computed at runtime when unset.
+- **AdamW** ($\beta_1 = 0.9$, $\beta_2 = 0.95$, weight decay 0.1 on 2D params
+  only), cosine LR with 5% warmup, gradient clip 1.0.
 
 ## Status
 
@@ -111,7 +156,9 @@ python evaluate.py -c configs/1m.yaml --checkpoint checkpoints/1m/best.pt --skip
   `GPTConfig`, `set_base_shapes()` ordering enforced). Runs pending.
 - Stage 4 — `generate.py` and `evaluate.py` complete. Sample-based runs
   pending (require a trained checkpoint).
-- Stage 5 (analysis) — pending empirical results.
+- Stage 5 (analysis) — `analysis.ipynb` scaffolded with all plotting and
+  power-law fit code. Cells gracefully skip sections whose input files
+  don't exist yet, so it can be run incrementally as results land.
 
 ## References
 

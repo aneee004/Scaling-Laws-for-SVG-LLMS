@@ -3,9 +3,11 @@ import csv
 import inspect
 import math
 import os
+import pathlib
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
 import torch
@@ -13,6 +15,8 @@ import yaml
 from mup import MuAdamW, set_base_shapes
 
 from model.transformer import GPT, GPTConfig
+
+BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 
 # Width of the proxy base model used by set_base_shapes().
@@ -28,13 +32,13 @@ class TrainingConfig:
     lr: float
     min_lr: float
     warmup_frac: float
-    max_steps: int
     grad_clip: float
     weight_decay: float
     eval_interval: int
     save_interval: int
     checkpoint_dir: str
     log_backend: str
+    max_steps: Optional[int] = None
 
 
 @dataclass
@@ -54,8 +58,10 @@ def _deep_merge(base, override):
 
 
 def load_config(config_path, override_path):
-    with open(config_path) as fp:
+    with open(BASE_CONFIG) as fp:
         cfg = yaml.safe_load(fp)
+    with open(config_path) as fp:
+        cfg = _deep_merge(cfg, yaml.safe_load(fp))
     if override_path:
         with open(override_path) as fp:
             cfg = _deep_merge(cfg, yaml.safe_load(fp))
@@ -136,6 +142,11 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
         torch.amp.autocast(device_type="cuda", dtype=dtype)
         if device_cfg.device == "cuda" else nullcontext()
     )
+
+    if train_cfg.max_steps is None:
+        steps = max(1, math.ceil(len(train_data) / train_cfg.batch_tokens))
+        print(f"max_steps unset — auto = 1 epoch = {steps} steps")
+        train_cfg = replace(train_cfg, max_steps=steps)
 
     seq_len          = gpt_cfg.max_seq_len
     micro_batch_size = train_cfg.micro_batch_size

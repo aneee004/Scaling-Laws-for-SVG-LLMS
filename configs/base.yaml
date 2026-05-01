@@ -2,8 +2,8 @@ data:
   dataset_name: "starvector/svg-stack"
   dataset_split: "train"
   hf_cache_dir: ""
-  min_chars: 64
-  max_chars: 8000 # tune after inspecting length distribution
+  min_chars: 50           # PDF minimum
+  max_chars: 8000         # ~1024 BPE tokens at typical SVG density
   train_frac: 0.98
   val_frac: 0.01
   test_frac: 0.01
@@ -15,6 +15,9 @@ data:
   load_from_cache_file: true
   dev_mode: false
   dev_samples: 1000
+  clean_svgs: true        # strip comments, collapse whitespace, round numerics
+  coord_precision: 1      # decimal places to keep in numeric SVG values
+  validate_xml: true      # drop SVGs that don't parse via lxml
 
 tokenizer:
   vocab_size: 4096
@@ -32,14 +35,14 @@ model:
 training:
   batch_tokens: 524288
   micro_batch_size: 8
-  lr: 3e-4
-  min_lr: 3e-5
+  lr: 3.0e-4
+  min_lr: 3.0e-5
   warmup_frac: 0.05
   max_steps:
   grad_clip: 1.0
   weight_decay: 0.1
-  eval_interval: 500
-  save_interval: 1000
+  eval_interval: 25         # 1 epoch on 100M tokens = ~191 steps, so ~8 evals per run
+  save_interval: 100000     # effectively disabled — best.pt is what we use
   checkpoint_dir: "checkpoints"
   log_backend: "csv"
 

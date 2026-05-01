@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import pathlib
 from contextlib import nullcontext
 
 import numpy as np
@@ -11,6 +12,8 @@ from tokenizers import ByteLevelBPETokenizer
 
 from generate import _deep_merge, generate, load_model
 from model.transformer import GPTConfig
+
+BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 try:
     from lxml import etree
@@ -26,8 +29,10 @@ except ImportError:
 
 
 def load_config(config_path, override_path):
-    with open(config_path) as fp:
+    with open(BASE_CONFIG) as fp:
         cfg = yaml.safe_load(fp)
+    with open(config_path) as fp:
+        cfg = _deep_merge(cfg, yaml.safe_load(fp))
     if override_path:
         with open(override_path) as fp:
             cfg = _deep_merge(cfg, yaml.safe_load(fp))
@@ -87,6 +92,27 @@ def is_valid_xml(svg_str):
         return False
 
 
+def is_structurally_valid(svg_str):
+    """Stronger than well-formed XML: must have an <svg> root and required attrs.
+
+    Per the PDF: 'correct <svg> root element, properly closed tags, valid
+    attribute values'. Properly-closed-tags is implied by lxml parsing
+    successfully; the additional checks live here.
+    """
+    try:
+        root = etree.fromstring(svg_str.encode("utf-8"))
+    except (etree.XMLSyntaxError, ValueError):
+        return False
+    # Strip namespace if present, e.g. {http://www.w3.org/2000/svg}svg
+    tag = root.tag.split("}")[-1]
+    if tag != "svg":
+        return False
+    # Need at least one of viewBox / (width AND height) — these are what cairosvg uses to render
+    has_viewbox = root.get("viewBox") is not None
+    has_size    = root.get("width") is not None and root.get("height") is not None
+    return has_viewbox or has_size
+
+
 def can_render(svg_str):
     try:
         cairosvg.svg2png(bytestring=svg_str.encode("utf-8"))
@@ -104,6 +130,11 @@ def main():
     parser.add_argument("--max_new_tokens",  type=int,   default=1024)
     parser.add_argument("--temperature",     type=float, default=0.8)
     parser.add_argument("--top_k",           type=int,   default=200)
+    parser.add_argument("--top_p",           type=float, default=None,
+                        help="Nucleus sampling threshold (composes with top_k).")
+    parser.add_argument("--temperature_sweep", type=float, nargs="+", default=None,
+                        help="Sweep multiple temperatures (e.g. 0.5 0.8 1.0). "
+                             "If set, generates --num_samples per temperature.")
     parser.add_argument("--batch_size",      type=int,   default=8,
                         help="batch size for perplexity (independent of training)")
     parser.add_argument("--max_perplexity_windows", type=int, default=None,
@@ -154,45 +185,52 @@ def main():
     }
 
     # ----- Sample-based metrics -----
-    if not args.skip_generation:
-        print(f"\nGenerating {args.num_samples} unconditional samples...")
-        samples = []
+    def _sample_batch(temperature):
+        """Generate args.num_samples unconditional samples at the given temperature."""
+        out_samples = []
         for i in range(args.num_samples):
             x = torch.tensor([[eot_id]], dtype=torch.long, device=device)
             out = generate(
                 model, x, args.max_new_tokens,
-                temperature=args.temperature, top_k=args.top_k, eot_id=eot_id,
+                temperature=temperature, top_k=args.top_k, top_p=args.top_p, eot_id=eot_id,
             )
             out_ids = out[0].tolist()
             if eot_id in out_ids[1:]:
                 cut = out_ids.index(eot_id, 1)
                 out_ids = out_ids[:cut]
-            samples.append(tokenizer.decode(out_ids))
+            out_samples.append(tokenizer.decode(out_ids))
             if (i + 1) % 10 == 0:
-                print(f"  {i + 1}/{args.num_samples}")
+                print(f"  T={temperature}  {i + 1}/{args.num_samples}")
+        return out_samples
 
+    def _score_samples(samples_list):
+        out = {}
         if HAS_LXML:
-            xml_ok    = [is_valid_xml(s) for s in samples]
-            xml_count = sum(xml_ok)
-            xml_rate  = xml_count / len(samples)
-            print(f"\nXML well-formedness: {xml_count}/{len(samples)} = {xml_rate:.2%}")
-            results["xml_valid"] = xml_count
-            results["xml_rate"]  = xml_rate
-
+            xml_ok = [is_valid_xml(s) for s in samples_list]
+            struct_ok = [is_structurally_valid(s) for s in samples_list]
+            out["xml_rate"]    = sum(xml_ok)    / len(samples_list)
+            out["struct_rate"] = sum(struct_ok) / len(samples_list)
+            print(f"  XML well-formed:     {sum(xml_ok)}/{len(samples_list)} = {out['xml_rate']:.2%}")
+            print(f"  Structurally valid:  {sum(struct_ok)}/{len(samples_list)} = {out['struct_rate']:.2%}")
             if HAS_CAIROSVG:
-                valid_samples = [s for s, ok in zip(samples, xml_ok) if ok]
-                rendered      = sum(can_render(s) for s in valid_samples)
-                in_valid_rate = rendered / max(1, len(valid_samples))
-                overall_rate  = rendered / len(samples)
-                print(f"Render rate (of XML-valid): {rendered}/{len(valid_samples)} = {in_valid_rate:.2%}")
-                print(f"Render rate (overall):     {rendered}/{len(samples)} = {overall_rate:.2%}")
-                results["rendered"]            = rendered
-                results["render_rate_in_valid"] = in_valid_rate
-                results["render_rate_overall"]  = overall_rate
-            else:
-                print("cairosvg not installed — skipping render check.")
+                valid = [s for s, ok in zip(samples_list, xml_ok) if ok]
+                rendered = sum(can_render(s) for s in valid)
+                out["render_rate_overall"]  = rendered / len(samples_list)
+                out["render_rate_in_valid"] = rendered / max(1, len(valid))
+                print(f"  Render rate (overall):    {rendered}/{len(samples_list)} = {out['render_rate_overall']:.2%}")
+        return out
+
+    if not args.skip_generation:
+        if args.temperature_sweep:
+            results["per_temperature"] = {}
+            for T in args.temperature_sweep:
+                print(f"\n=== Generating {args.num_samples} samples @ T={T} ===")
+                samples = _sample_batch(T)
+                results["per_temperature"][str(T)] = _score_samples(samples)
         else:
-            print("\nlxml not installed — skipping XML/render checks.")
+            print(f"\nGenerating {args.num_samples} unconditional samples @ T={args.temperature}...")
+            samples = _sample_batch(args.temperature)
+            results.update(_score_samples(samples))
 
     if args.output_json:
         with open(args.output_json, "w") as f:

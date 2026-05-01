@@ -3,6 +3,7 @@ import csv
 import inspect
 import math
 import os
+import pathlib
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ import torch
 import yaml
 
 from model.transformer import GPT, GPTConfig
+
+BASE_CONFIG = pathlib.Path(__file__).parent / "configs" / "base.yaml"
 
 
 @dataclass
@@ -47,8 +50,10 @@ def _deep_merge(base, override):
 
 
 def load_config(config_path, override_path):
-    with open(config_path) as fp:
+    with open(BASE_CONFIG) as fp:
         cfg = yaml.safe_load(fp)
+    with open(config_path) as fp:
+        cfg = _deep_merge(cfg, yaml.safe_load(fp))
     if override_path:
         with open(override_path) as fp:
             cfg = _deep_merge(cfg, yaml.safe_load(fp))
@@ -86,7 +91,7 @@ def get_lr(step, train_cfg):
     return train_cfg.min_lr + coeff * (train_cfg.lr - train_cfg.min_lr)
 
 
-def configure_optimizer(model, train_cfg, device_cfg):
+def configure_optimizer(model, train_cfg, device_cfg, use_mup=False):
     param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
     nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
@@ -94,6 +99,9 @@ def configure_optimizer(model, train_cfg, device_cfg):
         {"params": decay_params, "weight_decay": train_cfg.weight_decay},
         {"params": nodecay_params, "weight_decay": 0.0},
     ]
+    if use_mup:
+        from mup import MuAdamW
+        return MuAdamW(optim_groups, lr=train_cfg.lr, betas=(0.9, 0.95))
     use_fused = (
         device_cfg.device == "cuda"
         and "fused" in inspect.signature(torch.optim.AdamW).parameters
@@ -104,6 +112,25 @@ def configure_optimizer(model, train_cfg, device_cfg):
         betas=(0.9, 0.95),
         **({"fused": True} if use_fused else {}),
     )
+
+
+MUP_BASE_WIDTH = 128
+
+
+def build_model(gpt_cfg, device, use_mup):
+    """Build a fresh model for one sweep run. For µP, attach base shapes before any optimizer step."""
+    if use_mup:
+        from dataclasses import replace as _replace
+        from mup import set_base_shapes
+        gpt_cfg = _replace(gpt_cfg, mup=True)
+        base_cfg   = _replace(gpt_cfg, n_embd=MUP_BASE_WIDTH)
+        base_model = GPT(base_cfg)
+        model      = GPT(gpt_cfg)
+        set_base_shapes(model, base_model)
+        del base_model
+    else:
+        model = GPT(gpt_cfg)
+    return model.to(device)
 
 
 @torch.no_grad()
@@ -117,7 +144,7 @@ def evaluate(model, val_data, seq_len, batch_size, device, ctx, eval_batches=20)
     return sum(losses) / len(losses)
 
 
-def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir, save_checkpoints=True):
+def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir, save_checkpoints=True, use_mup=False):
     device = torch.device(device_cfg.device)
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[device_cfg.dtype]
     ctx = (
@@ -134,7 +161,7 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
         f"seq_len={seq_len} * micro_batch_size={micro_batch_size}"
     )
 
-    optimizer = configure_optimizer(model, train_cfg, device_cfg)
+    optimizer = configure_optimizer(model, train_cfg, device_cfg, use_mup=use_mup)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     log_path = os.path.join(checkpoint_dir, "log.csv")
@@ -210,6 +237,8 @@ def main():
                         help="Learning rates to sweep, e.g. --lrs 1e-4 3e-4 1e-3 3e-3 1e-2")
     parser.add_argument("--sweep_frac", type=float, default=0.15,
                         help="Fraction of max_steps to run per LR (default 0.15)")
+    parser.add_argument("--mup", action="store_true",
+                        help="Sweep under µP (set_base_shapes + MuAdamW). Default is SP.")
     args = parser.parse_args()
 
     gpt_cfg, train_cfg, device_cfg, data_dir = load_config(args.config, args.override)
@@ -219,18 +248,26 @@ def main():
     val_data   = np.load(os.path.join(data_dir, "val.npy"))
 
     config_name  = os.path.splitext(os.path.basename(args.config))[0]
-    sweep_dir    = os.path.join(train_cfg.checkpoint_dir, config_name, "sweep")
-    sweep_steps  = max(1, int(train_cfg.max_steps * args.sweep_frac))
+    sweep_tag    = f"{config_name}_mup_sweep" if args.mup else f"{config_name}_sweep"
+    sweep_dir    = os.path.join(train_cfg.checkpoint_dir, sweep_tag)
+
+    # If max_steps is None we resolve it to 1-epoch on train_data, then take the sweep fraction.
+    if train_cfg.max_steps is None:
+        full_steps = max(1, math.ceil(len(train_data) / train_cfg.batch_tokens))
+        print(f"max_steps unset — full epoch = {full_steps} steps; sweep uses {args.sweep_frac:.0%}")
+    else:
+        full_steps = train_cfg.max_steps
+    sweep_steps = max(1, int(full_steps * args.sweep_frac))
 
     results = []
     for lr in args.lrs:
-        print(f"\n{'='*50}\nLR sweep: {lr:.1e}  ({sweep_steps} steps)\n{'='*50}")
+        print(f"\n{'='*50}\nLR sweep: {lr:.1e}  ({sweep_steps} steps, {'µP' if args.mup else 'SP'})\n{'='*50}")
         from dataclasses import replace
         run_cfg = replace(train_cfg, lr=lr, min_lr=lr / 10, max_steps=sweep_steps)
-        model   = GPT(gpt_cfg).to(device)
+        model   = build_model(gpt_cfg, device, use_mup=args.mup)
         run_dir = os.path.join(sweep_dir, f"lr_{lr:.0e}")
         best_val = train(model, train_data, val_data, run_cfg, device_cfg, gpt_cfg,
-                         run_dir, save_checkpoints=False)
+                         run_dir, save_checkpoints=False, use_mup=args.mup)
         results.append((lr, best_val))
 
     results.sort(key=lambda x: x[1])

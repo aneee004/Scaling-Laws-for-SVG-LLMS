@@ -4,7 +4,6 @@ data:
   hf_cache_dir: ""
   min_chars: 50           # PDF minimum
   max_chars: 8000         # ~1024 BPE tokens at typical SVG density
-  train_frac: 0.98
   val_frac: 0.01
   test_frac: 0.01
   seed: 42

@@ -162,17 +162,21 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
     log_path = os.path.join(checkpoint_dir, "log.csv")
     log_file = open(log_path, "w", newline="")
     logger   = csv.writer(log_file)
-    logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s"])
+    logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s",
+                     "tokens_per_sec", "peak_mem_gb"])
     log_file.flush()
 
     best_val_loss = float("inf")
     t0 = time.time()
+    if device_cfg.device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     for step in range(train_cfg.max_steps):
         lr = get_lr(step, train_cfg)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
+        step_start = time.time()
         optimizer.zero_grad()
         accum_loss = 0.0
         for _ in range(grad_accum_steps):
@@ -184,12 +188,22 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
         optimizer.step()
+        step_dt = time.time() - step_start
+        tokens_per_sec = train_cfg.batch_tokens / max(step_dt, 1e-6)
 
         if step % train_cfg.eval_interval == 0:
             val_loss = evaluate(model, val_data, seq_len, micro_batch_size, device, ctx)
             elapsed  = time.time() - t0
-            print(f"step {step:5d} | train {accum_loss:.4f} | val {val_loss:.4f} | lr {lr:.2e} | {elapsed:.1f}s")
-            logger.writerow([step, round(accum_loss, 6), round(val_loss, 6), lr, round(elapsed, 1)])
+            peak_mem = (torch.cuda.max_memory_allocated() / 1e9
+                        if device_cfg.device == "cuda" else 0.0)
+            print(
+                f"step {step:5d} | train {accum_loss:.4f} | val {val_loss:.4f} | "
+                f"lr {lr:.2e} | {tokens_per_sec:,.0f} tok/s | mem {peak_mem:.2f} GB | {elapsed:.1f}s"
+            )
+            logger.writerow(
+                [step, round(accum_loss, 6), round(val_loss, 6), lr,
+                 round(elapsed, 1), round(tokens_per_sec, 1), round(peak_mem, 3)]
+            )
             log_file.flush()
 
             if val_loss < best_val_loss:

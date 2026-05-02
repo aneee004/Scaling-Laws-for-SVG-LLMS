@@ -1,0 +1,13 @@
+<svg viewBox="0 0 354 430" version="1.1" xmlns="http://www.w3.org/2000/svg" >
+    <title>cv icon</title>
+    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g transform="translate(25.000000, 25.000000)" stroke="currentColor" stroke-width="25">
+            <rect id="Rectangle" x="-12.5" y="-12.5" width="329" height="405" rx="8"></rect>
+            <line x1="63.5" y1="295.5" x2="240.5" y2="295.5" id="Line" stroke-linecap="round" stroke-linejoin="round"></line>
+            <line x1="64" y1="247" x2="241" y2="247" id="Line" stroke-linecap="round" stroke-linejoin="round"></line>
+            <line x1="64" y1="200" x2="241" y2="200" id="Line" stroke-linecap="round" stroke-linejoin="round"></line>
+            <path d="M171,56 L200.5,137.5 M230,56 L200.5,137.5" id="Combined-Shape" stroke-linecap="round"></path>
+            <path d="M120.80656,57.4880285 C116.70845,55.499988 111.606839,54.6618752 105.501728,54.9736901 C96.1594479,55.4508415 83.0635436,62.7740054 77.7605838,68.6844583 C64.1288838,83.8777702 63.3166532,110.682682 72.5641826,121.430911 C85.3410801,136.281258 101.611454,141.582439 120.80656,137.664788" id="Path" stroke-linecap="round" stroke-linejoin="bevel"></path>
+        </g>
+    </g>
+</svg>

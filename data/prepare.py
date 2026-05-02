@@ -128,7 +128,7 @@ def is_valid_xml(text: str) -> bool:
         return False
 
 
-def clean_and_validate(ds, data_cfg: DataConfig):
+def clean_and_validate(ds, data_cfg: DataConfig, label: str = ""):
     """Apply optional SVG cleaning and XML validation as map/filter steps."""
     if not (data_cfg.clean_svgs or data_cfg.validate_xml):
         return ds
@@ -146,7 +146,7 @@ def clean_and_validate(ds, data_cfg: DataConfig):
             _clean,
             num_proc=data_cfg.num_proc,
             load_from_cache_file=data_cfg.load_from_cache_file,
-            desc="Cleaning SVGs",
+            desc=f"Cleaning SVGs ({label})" if label else "Cleaning SVGs",
         )
 
     if data_cfg.validate_xml:
@@ -154,11 +154,34 @@ def clean_and_validate(ds, data_cfg: DataConfig):
             lambda ex: is_valid_xml(ex[SVG_COL]),
             num_proc=data_cfg.num_proc,
             load_from_cache_file=data_cfg.load_from_cache_file,
-            desc="Validating XML",
+            desc=f"Validating XML ({label})" if label else "Validating XML",
         )
 
-    print(f"Clean+validate: {n_before} → {len(ds)} samples")
+    tag = f" [{label}]" if label else ""
+    print(f"Clean+validate{tag}: {n_before} → {len(ds)} samples")
     return ds
+
+
+def cap_train_split(splits, data_cfg: DataConfig, model_cfg: ModelConfig):
+    """Cap the train split to roughly what's needed for the token budget.
+
+    Each sample contributes at most ``max_seq_len`` tokens (longer ones get
+    dropped in ``tokenize_and_save``), so ``token_budget / max_seq_len`` is the
+    minimum sample count. Real SVGs average well below the cap, so multiply by
+    a safety factor. Capping here avoids cleaning + XML-validating + training
+    the tokenizer on data that will never be written to disk.
+    """
+    safety = 4
+    max_samples = safety * data_cfg.token_budget // model_cfg.max_seq_len
+    train = splits["train"]
+    if len(train) > max_samples:
+        n_before = len(train)
+        splits["train"] = train.select(range(max_samples))
+        print(
+            f"Cap train: {n_before} → {len(splits['train'])} samples "
+            f"({safety}× token_budget/max_seq_len)"
+        )
+    return splits
 
 
 def load_and_filter(data_cfg: DataConfig):
@@ -168,6 +191,11 @@ def load_and_filter(data_cfg: DataConfig):
         cache_dir=data_cfg.cache_dir,
         trust_remote_code=True,
     )
+
+    # In dev mode, slice the raw dataset *before* filtering so we don't pay the
+    # full-corpus filter cost just to throw most rows away.
+    if data_cfg.dev_mode:
+        ds = ds.select(range(min(data_cfg.dev_samples * 4, len(ds))))
 
     n_before = len(ds)
     ds = ds.filter(
@@ -318,8 +346,11 @@ def main():
 
     data_cfg, tok_cfg, model_cfg = load_config(args.config, args.override, args.dev)
     ds = load_and_filter(data_cfg)
-    ds = clean_and_validate(ds, data_cfg)
     splits = split_dataset(ds, data_cfg)
+    splits = cap_train_split(splits, data_cfg, model_cfg)
+    splits = datasets.DatasetDict(
+        {name: clean_and_validate(s, data_cfg, label=name) for name, s in splits.items()}
+    )
     tok = train_tokenizer(splits["train"], tok_cfg)
     tokenize_and_save(splits, tok, data_cfg, model_cfg)
     verify(data_cfg, tok_cfg)

@@ -1,0 +1,9 @@
+{
+  "perplexity": 8.04618829814335,
+  "avg_loss": 2.0851984759561377,
+  "test_tokens": 4700187,
+  "xml_rate": 0.0,
+  "struct_rate": 0.0,
+  "render_rate_overall": 0.0,
+  "render_rate_in_valid": 0.0
+}

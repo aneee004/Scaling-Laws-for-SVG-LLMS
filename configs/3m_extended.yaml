@@ -1,0 +1,22 @@
+# Extended-training variant of the 3m model — used for portfolio-grade
+# qualitative figures only. NOT part of the 1-epoch scaling-law experiment.
+#
+# 3m is the empirical sweet spot of the 1-epoch scaling sweep
+# (Table tab:eval-summary), so it is the natural candidate for further
+# training to demonstrate that the architecture can produce visible
+# rendered SVG content given a non-token-starved compute budget.
+#
+# Usage (Colab):
+#   !python train.py -c configs/3m_extended.yaml -o configs/colab.yaml
+#
+# Wall time on Colab L4: ~2.5 hours (~1 sec/step × 8800 steps).
+# Checkpoints land at:    {checkpoint_dir}/3m_extended/best.pt
+model:
+  n_layer: 4
+  n_head: 8
+  n_embd: 256
+
+training:
+  max_steps: 8800       # 50 epochs at 176 steps/epoch on the ~92M-token corpus
+  eval_interval: 200    # ~44 evaluations across the run
+  save_interval: 2000   # one periodic checkpoint per ~11 epochs (mostly insurance against timeouts)

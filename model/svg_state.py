@@ -100,10 +100,12 @@ class SVGGuide:
         p = self.pos
 
         if p == self.OUTSIDE:
+            # If the root has been closed already, only whitespace is permitted.
+            if self.root_seen and not self.stack:
+                if ch in WS_CHARS:
+                    return True
+                return False
             if ch == "<":
-                if self.root_seen and not self.stack:
-                    # Already emitted (and closed) the root — no more tags allowed.
-                    return False
                 self.pos = self.TAG_OPEN
                 self.name_buf = ""
                 return True

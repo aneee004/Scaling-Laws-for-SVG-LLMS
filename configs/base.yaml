@@ -1,5 +1,5 @@
 data:
-  dataset_name: "starvector/svg-stack"
+  dataset_name: "starvector/svg-stack-simple"
   dataset_split: "train"
   hf_cache_dir: ""
   min_chars: 50           # PDF minimum

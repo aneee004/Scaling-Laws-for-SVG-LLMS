@@ -1,0 +1,29 @@
+# Extended-training variant of the 12m model — portfolio-grade qualitative
+# figure only. NOT part of the 1-epoch scaling-law experiment.
+#
+# 12m has ~5x the capacity of 3m_extended, so it can express richer SVG
+# structure (more diverse element types, more complex paths) while still
+# fitting in Colab L4 wall time. SP (not µP) — the 1-epoch sweep showed
+# SP winning at every size >= 3m, with a widening gap to µP.
+#
+# Usage (Colab):
+#   !python train.py -c configs/12m_extended.yaml -o configs/colab.yaml
+#
+# Wall time on Colab L4: ~6.5 hours (~2.5 sec/step × 8800 steps).
+# Expected outcome: val_loss should drop below 0.4 (compared to 3m_extended's
+# 0.46 plateau). With more capacity, the model has a chance to internalise
+# patterns 3m couldn't represent — particularly path d-attribute grammars
+# and multi-element compositions.
+#
+# Checkpoints land at:    {checkpoint_dir}/12m_extended/best.pt
+model:
+  n_layer: 8
+  n_head: 6
+  n_embd: 384
+
+training:
+  lr: 1.0e-2            # SP sweep winner from the scaling-law experiment
+  min_lr: 1.0e-3        # 1/10 of peak (cosine-decayed final LR)
+  max_steps: 8800       # 50 epochs at 176 steps/epoch on the ~92M-token corpus
+  eval_interval: 200    # ~44 evaluations across the run
+  save_interval: 2000   # one periodic checkpoint per ~11 epochs (timeout insurance)

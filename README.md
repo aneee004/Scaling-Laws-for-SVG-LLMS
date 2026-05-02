@@ -112,13 +112,19 @@ python evaluate.py -c configs/88m.yaml --checkpoint checkpoints/88m/best.pt --sk
 # Stage 5 — analysis (after all training/eval runs are in)
 jupyter notebook analysis.ipynb
 
-# Optional — Extended training (for portfolio figure, not the scaling-law experiment).
-# Trains the 3m sweet-spot model for 50 epochs (~2.5h on Colab L4).
-python train.py -c configs/3m_extended.yaml -o configs/colab.yaml
-python generate_constrained.py -c configs/3m_extended.yaml -o configs/colab.yaml \
-    --checkpoint checkpoints/3m_extended/best.pt --num_samples 30 \
-    --prompt '<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">' \
-    --output_dir samples/extended_constrained
+# Optional — Extended training (portfolio figure, not the scaling-law experiment).
+#   3m  — sweet-spot for the 1-epoch scaling experiment, 50 epochs ≈ 2.5h on L4.
+#   12m — 5x more capacity, richer outputs expected, 50 epochs ≈ 6.5h on L4.
+python train.py -c configs/3m_extended.yaml  -o configs/colab.yaml
+python train.py -c configs/12m_extended.yaml -o configs/colab.yaml
+
+# Generate visible-content samples with the full constraint stack.
+python generate_constrained.py -c configs/12m_extended.yaml -o configs/colab.yaml \
+    --checkpoint checkpoints/12m_extended/best.pt --num_samples 30 \
+    --prompt '<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" fill="red" stroke="black">' \
+    --tag_whitelist svg rect circle ellipse line path polygon polyline g \
+    --forbid_bare_text --attr_whitelist \
+    --output_dir samples/12m_extended_constrained
 ```
 
 `analysis.ipynb` reads `checkpoints/{size}/log.csv`, `checkpoints/{size}/sweep/sweep_results.csv`, and `results/{size}_eval.json`, then produces:

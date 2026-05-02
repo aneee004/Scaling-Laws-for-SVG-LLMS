@@ -65,6 +65,11 @@ def build_valid_token_mask(state: SVGGuide, token_strings, eot_id, vocab_size,
 def force_close_tags(state: SVGGuide, tokenizer, idx, model, max_close_tokens=400):
     """Drive the state machine to ``is_done()`` regardless of where it is.
 
+    Cleanup-time only: relaxes the strict required-attr constraint so the
+    state machine can accept ``=""/>`` and ``</NAME>`` to wrap up. The
+    relaxation is reverted before returning so subsequent generation calls
+    use the original constraint set.
+
     Handles four cases that can arise when ``max_new_tokens`` is hit mid-output:
       1. inside an open quote -> append the matching quote
       2. mid-tag-body / after attr-name without value -> append a placeholder
@@ -78,6 +83,11 @@ def force_close_tags(state: SVGGuide, tokenizer, idx, model, max_close_tokens=40
     """
     device = idx.device
 
+    # Disable strict required-attr enforcement during cleanup so we can self-close
+    # tags whose required attributes were never emitted.
+    saved_whitelists = state.attr_whitelists
+    state.attr_whitelists = None
+
     def _append_str(s: str):
         nonlocal idx
         if not state.feed(s):
@@ -90,16 +100,18 @@ def force_close_tags(state: SVGGuide, tokenizer, idx, model, max_close_tokens=40
     if state.in_quote is not None:
         _append_str(state.in_quote)
 
-    # 2. recoverable mid-tag states
+    # 2. recoverable mid-tag states. We discard any partial attribute under
+    # construction and self-close the tag directly so the duplicate-attr /
+    # required-attr / numeric checks do not block us.
     p = state.pos
     if p in (SVGGuide.TAG_AFTER_NAME, SVGGuide.ATTR_DONE):
-        # End the tag with /> (self-closing, doesn't grow the stack).
         _append_str("/>")
-    elif p == SVGGuide.ATTR_NAME or p == SVGGuide.ATTR_AFTER_NAME:
-        # Add =""/> to close out the attribute and self-close the tag.
-        _append_str('=""/>')
-    elif p == SVGGuide.ATTR_AFTER_EQ:
-        _append_str('""/>')
+    elif p in (SVGGuide.ATTR_NAME, SVGGuide.ATTR_AFTER_NAME, SVGGuide.ATTR_AFTER_EQ):
+        # Reset partial-attr buffer and rewind state to TAG_AFTER_NAME so
+        # `_step('/')` produces a SELF_CLOSE without re-validating the abandoned attr.
+        state._attr_name_buf = ""
+        state.pos = SVGGuide.TAG_AFTER_NAME
+        _append_str("/>")
     # Mid-tag-name or close-tag-name states are unrecoverable.
 
     # 3. close any tags still on the stack
@@ -111,6 +123,8 @@ def force_close_tags(state: SVGGuide, tokenizer, idx, model, max_close_tokens=40
             break
         appended += len(close_str)
 
+    # Restore the original whitelist for any subsequent calls.
+    state.attr_whitelists = saved_whitelists
     return idx
 
 
@@ -218,6 +232,15 @@ def main():
     parser.add_argument("--output_dir",       default=None)
     parser.add_argument("--seed",             type=int,   default=None)
     parser.add_argument("--verbose",          action="store_true")
+    parser.add_argument("--tag_whitelist",    nargs="+", default=None,
+                        help="Restrict opened tag names to this set, e.g. "
+                             "--tag_whitelist svg rect circle path g")
+    parser.add_argument("--forbid_bare_text", action="store_true",
+                        help="Disallow non-whitespace text inside an open tag's body, "
+                             "forcing the model to open child tags rather than emit prose.")
+    parser.add_argument("--attr_whitelist", action="store_true",
+                        help="Enforce SVGGuide.DEFAULT_ATTR_WHITELISTS — drawable elements "
+                             "can only have canonical SVG attribute names.")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -246,7 +269,11 @@ def main():
     valid_count = 0
     t0 = time.time()
     for i in range(args.num_samples):
-        seed_state = SVGGuide()
+        seed_state = SVGGuide(
+            tag_whitelist=args.tag_whitelist,
+            forbid_bare_text=args.forbid_bare_text,
+            attr_whitelists=SVGGuide.DEFAULT_ATTR_WHITELISTS if args.attr_whitelist else None,
+        )
         seed_state.feed(seed_chars)
 
         x = torch.tensor([seed_ids], dtype=torch.long, device=device)

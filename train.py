@@ -133,7 +133,8 @@ def resolve_max_steps(train_cfg, train_data) -> TrainingConfig:
     return train_cfg
 
 
-def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir):
+def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir,
+          resume_path=None):
     device = torch.device(device_cfg.device)
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[device_cfg.dtype]
     ctx = (
@@ -155,18 +156,33 @@ def train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoin
     optimizer = configure_optimizer(model, train_cfg, device_cfg)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    log_path = os.path.join(checkpoint_dir, "log.csv")
-    log_file = open(log_path, "w", newline="")
-    logger = csv.writer(log_file)
-    logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s", "tokens_per_sec", "peak_mem_gb"])
-    log_file.flush()
-
+    # Resume: load model + optimizer + step counter from a previous checkpoint.
+    start_step = 0
     best_val_loss = float("inf")
+    log_mode = "w"
+    if resume_path is not None and os.path.exists(resume_path):
+        print(f"Resuming from {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        start_step = int(ckpt.get("step", 0)) + 1
+        best_val_loss = float(ckpt.get("val_loss", float("inf")))
+        log_mode = "a"   # append to existing log
+        print(f"  resumed at step={start_step}, best_val_loss={best_val_loss:.4f}")
+
+    log_path = os.path.join(checkpoint_dir, "log.csv")
+    log_file = open(log_path, log_mode, newline="")
+    logger = csv.writer(log_file)
+    if log_mode == "w":
+        logger.writerow(["step", "train_loss", "val_loss", "lr", "elapsed_s", "tokens_per_sec", "peak_mem_gb"])
+        log_file.flush()
+
     t0 = time.time()
     if device_cfg.device == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
-    for step in range(train_cfg.max_steps):
+    for step in range(start_step, train_cfg.max_steps):
         lr = get_lr(step, train_cfg)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
@@ -231,6 +247,14 @@ def main():
     parser = argparse.ArgumentParser(prog="SVG LLM — train")
     parser.add_argument("-c", "--config", required=True)
     parser.add_argument("-o", "--override", default=None)
+    parser.add_argument("--resume", default=None,
+                        help="Path to a checkpoint .pt to resume from. "
+                             "Loads model + optimizer state + step counter; "
+                             "appends to existing log.csv.")
+    parser.add_argument("--auto-resume", action="store_true",
+                        help="If checkpoint_dir contains ckpt_*.pt files, "
+                             "automatically resume from the latest. Convenient "
+                             "after a Colab disconnect.")
     args = parser.parse_args()
 
     gpt_cfg, train_cfg, device_cfg, data_dir = load_config(args.config, args.override)
@@ -243,7 +267,18 @@ def main():
     config_name = os.path.splitext(os.path.basename(args.config))[0]
     checkpoint_dir = os.path.join(train_cfg.checkpoint_dir, config_name)
 
-    train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir)
+    resume_path = args.resume
+    if resume_path is None and args.auto_resume:
+        # find latest ckpt_*.pt in the checkpoint dir, if any
+        if os.path.isdir(checkpoint_dir):
+            ckpts = sorted(f for f in os.listdir(checkpoint_dir)
+                           if f.startswith("ckpt_") and f.endswith(".pt"))
+            if ckpts:
+                resume_path = os.path.join(checkpoint_dir, ckpts[-1])
+                print(f"--auto-resume: found {resume_path}")
+
+    train(model, train_data, val_data, train_cfg, device_cfg, gpt_cfg, checkpoint_dir,
+          resume_path=resume_path)
 
 
 if __name__ == "__main__":
